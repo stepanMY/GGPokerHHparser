@@ -1,199 +1,215 @@
 import re
 
 class PokerHand:
-    def __init__(self, hand_history):
-        self.hand_history = hand_history
-        self.lines = [line.strip() for line in hand_history.split('\n') if line.strip()]
-        self.hand_info = {}
-        self.players = []
-        self.blinds = []
-        self.hero_cards = []
-        self.actions = {
-            'preflop': [],
-            'flop': [],
-            'turn': [],
-            'river': [],
-            'showdown': []
-        }
-        self.board = []
-        self.summary = {
-            'total_pot': 0.0,
-            'rake': 0.0,
+    def __init__(self, hand_text):
+        self.hand_text = hand_text
+        self.parsed_data = {
+            'hand_id': None,
+            'date_time': None,
+            'blinds': {'sb': None, 'bb': None},
+            'button_seat': None,
+            'table_size': None,
+            'players': {},
+            'streets': {
+                'preflop': [],
+                'flop': [],
+                'turn': [],
+                'river': []
+            },
             'board': [],
-            'seat_results': []
+            'preflop_aggressor': None,
+            '3bet_pot': False,
+            '4bet_pot': False,
+            'c_bet': False,
+            'donk_bet': False,
+            'shown_cards': {},
+            'hand_types': {},
+            'pot_size': None,
+            'rake': None,
+            'jackpot': None,
+            'profits': {}
         }
-        self.current_section = None
-        self._parse()
+        self.current_street = None
 
-    def _parse(self):
-        for line in self.lines:
+    def parse(self):
+        lines = self.hand_text.strip().split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
             if line.startswith('Poker Hand #'):
                 self._parse_header(line)
             elif line.startswith('Table'):
                 self._parse_table(line)
-            elif line.startswith('Seat') and not self.current_section == 'summary':
-                self._parse_seat(line)
-            elif any(x in line for x in ['posts small blind', 'posts big blind']):
-                self._parse_blind(line)
-            elif line.startswith('***'):
-                self._parse_section_header(line)
+            elif line.startswith('Seat') and self.current_street is None:
+                self._parse_initial_seat(line)
+            elif '*** HOLE CARDS ***' in line:
+                self.current_street = 'preflop'
+            elif '*** FLOP ***' in line:
+                self.current_street = 'flop'
+                self._parse_board(line)
+            elif '*** TURN ***' in line:
+                self.current_street = 'turn'
+                self._parse_board(line)
+            elif '*** RIVER ***' in line:
+                self.current_street = 'river'
+                self._parse_board(line)
+            elif '*** SHOWDOWN ***' in line:
+                self.current_street = 'showdown'
+            elif '*** SUMMARY ***' in line:
+                self.current_street = 'summary'
             else:
-                self._parse_line_content(line)
+                if self.current_street in ['preflop', 'flop', 'turn', 'river']:
+                    self._parse_action(line)
+                elif self.current_street == 'summary':
+                    self._parse_summary_line(line)
+                else:
+                    if any(keyword in line for keyword in ['posts small blind', 'posts big blind']):
+                        self._parse_blind_post(line)
+                    elif 'Dealt to' in line:
+                        self._parse_dealt_cards(line)
+                    elif 'collected' in line and self.current_street != 'summary':
+                        self._parse_collected(line)
+                    elif ('shows' in line or 'mucks' in line) and self.current_street != 'summary':
+                        self._parse_showdown(line)
+
+        self._determine_preflop_aggressor()
+        self._check_3bet_4bet()
+        self._check_cbet_donkbet()
+        return self.parsed_data
 
     def _parse_header(self, line):
-        match = re.match(
-            r'Poker Hand #(HD\d+): (.+?) \((\$[\d.]+/\$[\d.]+)\) - (\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})',
-            line
-        )
+        header_re = r'Poker Hand #(\w+): (.*?) \((.*?)\) - (\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})'
+        match = re.match(header_re, line)
         if match:
-            self.hand_info = {
-                'hand_id': match.group(1),
-                'game_type': match.group(2),
-                'stakes': match.group(3),
-                'date': match.group(4)
-            }
+            self.parsed_data['hand_id'] = match.group(1)
+            blinds_str = match.group(3)
+            sb, bb = blinds_str.replace('$', '').split('/')
+            self.parsed_data['blinds']['sb'] = float(sb)
+            self.parsed_data['blinds']['bb'] = float(bb)
+            self.parsed_data['date_time'] = match.group(4)
 
     def _parse_table(self, line):
-        match = re.match(
-            r"Table '(.+?)' (\d+-max) Seat #(\d+) is the button",
-            line
-        )
+        parts = line.split()
+        self.parsed_data['table_size'] = parts[2]
+        button_seat = parts[-2].replace('#', '')
+        self.parsed_data['button_seat'] = int(button_seat)
+
+    def _parse_initial_seat(self, line):
+        parts = re.match(r'Seat (\d+): (.*?) \(\$([\d.]+) in chips\)', line)
+        if parts:
+            seat_num = parts.group(1)
+            player_name = parts.group(2)
+            stack = float(parts.group(3))
+            self.parsed_data['players'][player_name] = {
+                'seat': seat_num,
+                'stack': stack,
+                'position': None,
+                'hole_cards': None,
+                'profit': 0.0,
+                'hand_type': None
+            }
+
+    def _parse_blind_post(self, line):
+        player = line.split(':')[0].strip()
+        amount = float(re.findall(r'\$([\d.]+)', line)[0])
+        if 'small blind' in line:
+            self.parsed_data['players'][player]['position'] = 'SB'
+        elif 'big blind' in line:
+            self.parsed_data['players'][player]['position'] = 'BB'
+
+    def _parse_dealt_cards(self, line):
+        match = re.match(r'Dealt to (.*?) \[(.*?)\]', line)
         if match:
-            self.hand_info.update({
-                'table_name': match.group(1),
-                'max_players': match.group(2),
-                'button_seat': int(match.group(3))
-            })
+            player = match.group(1)
+            cards = match.group(2).split()
+            self.parsed_data['players'][player]['hole_cards'] = cards
 
-    def _parse_seat(self, line):
-        match = re.match(
-            r"Seat (\d+): (.+?) \(\$([\d.]+) in chips\)",
-            line
-        )
-        if match:
-            self.players.append({
-                'seat': int(match.group(1)),
-                'player': match.group(2),
-                'stack': float(match.group(3))
-            })
+    def _parse_action(self, line):
+        player_part, action_part = line.split(': ', 1)
+        player = player_part.strip()
+        action = action_part.strip()
+        self.parsed_data['streets'][self.current_street].append({'player': player, 'action': action})
 
-    def _parse_blind(self, line):
-        match = re.match(
-            r"(.+?): posts (small|big) blind \$([\d.]+)",
-            line
-        )
-        if match:
-            self.blinds.append({
-                'player': match.group(1),
-                'type': match.group(2),
-                'amount': float(match.group(3))
-            })
+    def _parse_summary_line(self, line):
+        if line.startswith('Total pot'):
+            parts = line.split('|')
+            for part in parts:
+                part = part.strip()
+                if part.startswith('Total pot'):
+                    self.parsed_data['pot_size'] = float(re.findall(r'\$([\d.]+)', part)[0])
+                elif part.startswith('Rake'):
+                    self.parsed_data['rake'] = float(re.findall(r'\$([\d.]+)', part)[0])
+                elif part.startswith('Jackpot'):
+                    self.parsed_data['jackpot'] = float(re.findall(r'\$([\d.]+)', part)[0])
+        elif line.startswith('Seat'):
+            seat_info = re.match(r'Seat \d+: (.*?)(?: \((.*?)\)|)(?: showed \[(.*?)\]|).*?(?:collected \$([\d.]+)|)', line)
+            if seat_info:
+                player = seat_info.group(1).strip()
+                position = seat_info.group(2)
+                cards = seat_info.group(3)
+                amount = seat_info.group(4)
+                if position:
+                    if 'small blind' in position:
+                        position = 'SB'
+                    elif 'big blind' in position:
+                        position = 'BB'
+                    elif 'button' in position:
+                        position = 'BU'
+                    self.parsed_data['players'][player]['position'] = position
+                if cards:
+                    self.parsed_data['shown_cards'][player] = cards.split()
+                if amount:
+                    self.parsed_data['profits'][player] = float(amount)
+                hand_type_match = re.search(r'with (.*?)\)', line)
+                if hand_type_match:
+                    self.parsed_data['hand_types'][player] = hand_type_match.group(1)
 
-    def _parse_section_header(self, line):
-        section_map = {
-            'HOLE CARDS': 'preflop',
-            'FLOP': 'flop',
-            'TURN': 'turn',
-            'RIVER': 'river',
-            'SHOWDOWN': 'showdown',
-            'SUMMARY': 'summary'
-        }
-        section = line.replace('***', '').strip().split()[0]
-        self.current_section = section_map.get(section, None)
-        
-        # Parse board cards if present in section header
-        if self.current_section in ['flop', 'turn', 'river']:
-            cards = re.findall(r'\[(.*?)\]', line)
-            if cards:
-                new_cards = cards[0].split()
-                if self.current_section == 'flop':
-                    self.board = new_cards
-                else:
-                    self.board.extend(new_cards)
-                self.summary['board'] = self.board
+    def _parse_showdown(self, line):
+        player_part, rest = line.split(':', 1)
+        player = player_part.strip()
+        if 'shows [' in rest:
+            cards = rest.split('[')[1].split(']')[0].split()
+            self.parsed_data['shown_cards'][player] = cards
+            hand_type = rest.split('] ')[1].split('(')[-1].split(')')[0]
+            self.parsed_data['hand_types'][player] = hand_type
 
-    def _parse_line_content(self, line):
-        if self.current_section == 'preflop':
-            if 'Dealt to Hero' in line:
-                self._parse_hero_cards(line)
-            else:
-                self._parse_action(line, 'preflop')
-        elif self.current_section in ['flop', 'turn', 'river', 'showdown']:
-            if line.startswith('Uncalled bet'):
-                self._parse_uncalled_bet(line, self.current_section)
-            else:
-                self._parse_action(line, self.current_section)
-        elif self.current_section == 'summary':
-            self._parse_summary(line)
+    def _parse_collected(self, line):
+        player = line.split(' collected')[0].strip()
+        amount = float(re.findall(r'\$([\d.]+)', line)[0])
+        self.parsed_data['profits'][player] = amount
 
-    def _parse_hero_cards(self, line):
+    def _parse_board(self, line):
         cards = re.findall(r'\[(.*?)\]', line)
         if cards:
-            self.hero_cards = cards[0].split()
+            new_cards = cards[-1].split()
+            self.parsed_data['board'].extend(new_cards)
 
-    def _parse_action(self, line, street):
-        action_patterns = [
-            (r'(.+?): folds', 'fold'),
-            (r'(.+?): checks', 'check'),
-            (r'(.+?): calls \$([\d.]+)', 'call'),
-            (r'(.+?): bets \$([\d.]+)', 'bet'),
-            (r'(.+?): raises \$([\d.]+) to \$([\d.]+)', 'raise'),
-            (r'(.+?) collected \$([\d.]+) from pot', 'collect')
-        ]
-
-        for pattern, action_type in action_patterns:
-            match = re.match(pattern, line)
-            if match:
-                action = {'player': match.group(1), 'action': action_type}
-                if action_type in ['call', 'bet']:
-                    action['amount'] = float(match.group(2))
-                elif action_type == 'raise':
-                    action['amount'] = float(match.group(2))
-                    action['total'] = float(match.group(3))
-                elif action_type == 'collect':
-                    action['amount'] = float(match.group(2))
-                self.actions[street].append(action)
+    def _determine_preflop_aggressor(self):
+        for action in self.parsed_data['streets']['preflop']:
+            if 'raises' in action['action']:
+                self.parsed_data['preflop_aggressor'] = action['player']
                 return
 
-    def _parse_uncalled_bet(self, line, street):
-        match = re.match(r'Uncalled bet \(\$([\d.]+)\) returned to (.+)', line)
-        if match:
-            self.actions[street].append({
-                'player': match.group(2),
-                'action': 'uncalled_bet_return',
-                'amount': float(match.group(1))
-            })
+    def _check_3bet_4bet(self):
+        raises = [a for a in self.parsed_data['streets']['preflop'] if 'raises' in a['action']]
+        num_raises = len(raises)
+        self.parsed_data['3bet_pot'] = num_raises >= 2
+        self.parsed_data['4bet_pot'] = num_raises >= 3
 
-    def _parse_summary(self, line):
-        if line.startswith('Total pot'):
-            self._parse_pot(line)
-        elif line.startswith('Board'):
-            self._parse_summary_board(line)
-        elif line.startswith('Seat'):
-            self._parse_seat_result(line)
-
-    def _parse_pot(self, line):
-        pot_match = re.search(r'Total pot \$([\d.]+)', line)
-        rake_match = re.search(r'Rake \$([\d.]+)', line)
-        if pot_match:
-            self.summary['total_pot'] = float(pot_match.group(1))
-        if rake_match:
-            self.summary['rake'] = float(rake_match.group(1))
-
-    def _parse_summary_board(self, line):
-        cards = re.findall(r'\[(.*?)\]', line)
-        if cards:
-            self.summary['board'] = cards[0].split()
-
-    def _parse_seat_result(self, line):
-        match = re.match(
-            r'Seat (\d+): (.+?) (folded|won|collected) (.*)',
-            line
-        )
-        if match:
-            self.summary['seat_results'].append({
-                'seat': int(match.group(1)),
-                'player': match.group(2),
-                'result': match.group(3),
-                'details': match.group(4)
-            })
+    def _check_cbet_donkbet(self):
+        aggressor = self.parsed_data['preflop_aggressor']
+        if not aggressor:
+            return
+        flop_actions = self.parsed_data['streets']['flop']
+        first_bet = None
+        for action in flop_actions:
+            if 'bets' in action['action']:
+                first_bet = action['player']
+                break
+        if first_bet:
+            if first_bet == aggressor:
+                self.parsed_data['c_bet'] = True
+            else:
+                self.parsed_data['donk_bet'] = True
