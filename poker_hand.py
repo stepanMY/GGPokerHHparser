@@ -20,8 +20,7 @@ class PokerHand:
             'board': {
                 'flop': [],
                 'turn': [],
-                'river': [],
-                'final': []
+                'river': []
             },
             'streets': {
                 'preflop': [],
@@ -79,8 +78,6 @@ class PokerHand:
             elif self.current_street == 'summary':
                 if line.startswith('Total pot'):
                     self._parse_summary(line)
-                elif line.startswith('Board'):
-                    self._parse_summary_board(line)
                 elif line.startswith('Seat '):
                     self._parse_summary_seat(line)
         self._determine_positions()
@@ -154,18 +151,15 @@ class PokerHand:
 
     def _parse_board(self, line):
         board_pattern = re.compile(r"\[([^\]]+)\]")
-        match = board_pattern.search(line)
+        match = board_pattern.findall(line)
         if match:
-            cards = match.group(1).split()
+            cards = flatten([elem.split() for elem in match])
             if self.current_street == 'flop':
                 self.parsed_data['board']['flop'] = cards
-                self.parsed_data['board']['final'] = cards.copy()
             elif self.current_street == 'turn':
                 self.parsed_data['board']['turn'] = cards
-                self.parsed_data['board']['final'].extend(cards)
             elif self.current_street == 'river':
                 self.parsed_data['board']['river'] = cards
-                self.parsed_data['board']['final'].extend(cards)
 
     def _parse_action(self, line):
         action_pattern = re.compile(
@@ -229,12 +223,6 @@ class PokerHand:
                 'net': total - (rake + jackpot + bingo + fortune + tax)
             }
 
-    def _parse_summary_board(self, line):
-        board_pattern = re.compile(r"\[([^\]]+)\]")
-        match = board_pattern.search(line)
-        if match:
-            self.parsed_data['board']['final'] = match.group(1).split()
-
     def _parse_summary_seat(self, line):
         summary_seat_pattern = re.compile(
             r"Seat \d+: ([^ ]+) (?:\(([^)]+)\) )?(?:showed \[([^\]]*)\] and (lost|won) \((\$[\d.]+)\))?(?: with (.*))?"
@@ -275,3 +263,6 @@ class PokerHand:
 
     def get_parsed_data(self):
         return self.parsed_data
+    
+def flatten(xss):
+    return [x for xs in xss for x in xs]
