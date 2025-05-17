@@ -136,6 +136,12 @@ class PokerHand:
             blind_type = match.group(2).lower()
             amount = float(match.group(3))
             self.parsed_data['blinds_posted'][f'{blind_type}_blind'] = player
+            action_str = line.split(': ')[1]
+            self.parsed_data['players'][player]['actions']['preflop'].append(action_str)
+            self.parsed_data['streets']['preflop'].append({
+                'player': player,
+                'action': action_str
+            })
 
     def _parse_hole_cards(self, line):
         hole_cards_pattern = re.compile(
@@ -252,12 +258,14 @@ class PokerHand:
         max_players = self.parsed_data['max_players']
         if max_players != 6:
             return
+        active_seats = [seat['seat'] for seat in self.parsed_data['seats']]
+        sorted_seats = sorted(active_seats, key=lambda x: (x - button_seat) % max_players)
         positions_order = ['BU', 'SB', 'BB', 'UTG', 'HJ', 'CO']
+        seatnum2pos = {sorted_seats[i]:positions_order[i] for i in range(len(sorted_seats))}
         for seat in self.parsed_data['seats']:
             seat_num = seat['seat']
             player = seat['player']
-            offset = (seat_num - button_seat) % max_players
-            position = positions_order[offset]
+            position = seatnum2pos[seat_num]
             if self.parsed_data['players'][player]['position'] is None:
                 self.parsed_data['players'][player]['position'] = position
 
